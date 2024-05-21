@@ -1,0 +1,40 @@
+;;; 
+Export: Release 21.0.0.0.0 - Production on Lun May 20 15:26:38 2024
+Version 21.3.0.0.0
+
+Copyright (c) 1982, 2021, Oracle and/or its affiliates.  All rights reserved.
+;;; 
+Conectado a: Oracle Database 21c Express Edition Release 21.0.0.0.0 - Production
+Iniciando "WE1RDOU"."SYS_EXPORT_SCHEMA_01":  we1rdou/********@xe directory=DATA_PUMP_DIR dumpfile=xe_20240520_152638.dmp logfile=xe_20240520_152638.log 
+Procesando el tipo de objeto SCHEMA_EXPORT/TABLE/TABLE_DATA
+Procesando el tipo de objeto SCHEMA_EXPORT/TABLE/INDEX/STATISTICS/INDEX_STATISTICS
+Procesando el tipo de objeto SCHEMA_EXPORT/TABLE/STATISTICS/TABLE_STATISTICS
+Procesando el tipo de objeto SCHEMA_EXPORT/STATISTICS/MARKER
+Procesando el tipo de objeto SCHEMA_EXPORT/PRE_SCHEMA/PROCACT_SCHEMA
+Procesando el tipo de objeto SCHEMA_EXPORT/TABLE/TABLE
+Procesando el tipo de objeto SCHEMA_EXPORT/TABLE/COMMENT
+Procesando el tipo de objeto SCHEMA_EXPORT/TABLE/INDEX/INDEX
+Procesando el tipo de objeto SCHEMA_EXPORT/TABLE/CONSTRAINT/CONSTRAINT
+Procesando el tipo de objeto SCHEMA_EXPORT/TABLE/CONSTRAINT/REF_CONSTRAINT
+. . "WE1RDOU"."CATEGORIA_PLATO"                     0 KB       0 filas exportadas
+. . "WE1RDOU"."CLIENTE"                             0 KB       0 filas exportadas
+. . "WE1RDOU"."CLIENTE_QUEJA"                       0 KB       0 filas exportadas
+. . "WE1RDOU"."COMPRA"                              0 KB       0 filas exportadas
+. . "WE1RDOU"."DETALLE_FACTURA"                     0 KB       0 filas exportadas
+. . "WE1RDOU"."EMPLEADO"                            0 KB       0 filas exportadas
+. . "WE1RDOU"."FACTURA"                             0 KB       0 filas exportadas
+. . "WE1RDOU"."INGREDIENTES"                        0 KB       0 filas exportadas
+. . "WE1RDOU"."MESA"                                0 KB       0 filas exportadas
+. . "WE1RDOU"."ORDEN"                               0 KB       0 filas exportadas
+. . "WE1RDOU"."PAGO"                                0 KB       0 filas exportadas
+. . "WE1RDOU"."PLATO"                               0 KB       0 filas exportadas
+. . "WE1RDOU"."PLATO_INGREDIENTES"                  0 KB       0 filas exportadas
+. . "WE1RDOU"."PLATO_ORDEN"                         0 KB       0 filas exportadas
+. . "WE1RDOU"."PROVEEDOR"                           0 KB       0 filas exportadas
+. . "WE1RDOU"."QUEJA"                               0 KB       0 filas exportadas
+. . "WE1RDOU"."RESERVACION"                         0 KB       0 filas exportadas
+La tabla maestra "WE1RDOU"."SYS_EXPORT_SCHEMA_01" se ha cargado/descargado correctamente
+******************************************************************************
+El juego de archivos de volcado para WE1RDOU.SYS_EXPORT_SCHEMA_01 es:
+  C:\APP\ORACLE\ADMIN\XE\DPDUMP\XE_20240520_152638.DMP
+El trabajo "WE1RDOU"."SYS_EXPORT_SCHEMA_01" ha terminado correctamente en Lun May 20 15:27:23 2024 elapsed 0 00:00:42
