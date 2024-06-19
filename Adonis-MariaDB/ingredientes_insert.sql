@@ -1,0 +1,8 @@
+
+    DELIMITER $$
+    CREATE PROCEDURE ingredientes_insert(IN p_ID_INGREDIENTES int(11), IN p_COMPRA_ID_COMPRA int(11), IN p_NOMBRE varchar(50), IN p_TIPO varchar(50))
+    BEGIN
+        INSERT INTO ingredientes (ID_INGREDIENTES, COMPRA_ID_COMPRA, NOMBRE, TIPO) VALUES (p_ID_INGREDIENTES, p_COMPRA_ID_COMPRA, p_NOMBRE, p_TIPO);
+    END$$
+    DELIMITER ;
+    
