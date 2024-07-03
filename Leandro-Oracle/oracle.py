@@ -3,10 +3,13 @@ import subprocess
 import os
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Spacer
 from reportlab.lib import colors
 from shutil import copy
 from shutil import copyfile
+import threading
+from time import time
+from reportlab.lib.units import inch
 
 def mostrar_menu():
     print("\nMenu de Opciones:")
@@ -21,7 +24,9 @@ def mostrar_menu():
     print("9. Restaurar base de datos")
     print("10. Generar PDF")
     print("11. CRUD")
-    print("12. Salir")
+    print("12. Triggers de auditoría")
+    print("13. Aplicación de hilos")
+    print("14. Salir")
 
 # CREAR USUARIOS
 def crear_usuario_oracle(cursor, nombre_usuario, contraseña):
@@ -550,98 +555,453 @@ def opcion10(cursor):
     generar_informe_completo(cursor, seleccion_tablas, join_condition, schema)
 
 
-##CRUD
-def obtener_detalles_tablas(cursor, schema):
+# CRUD
+
+def obtener_tablas(cursor):
+    cursor.execute("""
+        SELECT table_name 
+        FROM user_tables
+    """)
+    return [row[0] for row in cursor.fetchall()]
+
+def obtener_columnas(cursor, tabla):
+    cursor.execute("""
+        SELECT column_name, data_type, data_default 
+        FROM user_tab_columns 
+        WHERE table_name = :1
+    """, [tabla])
+    return cursor.fetchall()
+
+def eliminar_procedimiento(cursor, procedimiento):
     try:
-        cursor.execute("""
-            SELECT table_name, column_name, data_type 
-            FROM all_tab_columns 
-            WHERE owner = :owner
-            ORDER BY table_name, column_id
-        """, {"owner": schema.upper()})
-        result = cursor.fetchall()
-        tablas = {}
-        for row in result:
-            if row[0] not in tablas:
-                tablas[row[0]] = []
-            tablas[row[0]].append((row[1], row[2]))
-        return tablas
+        cursor.execute(f"""
+            BEGIN
+                EXECUTE IMMEDIATE 'DROP PROCEDURE {procedimiento}';
+            EXCEPTION
+                WHEN OTHERS THEN
+                    IF SQLCODE != -4043 THEN
+                        RAISE;
+                    END IF;
+            END;
+        """)
+    except cx_Oracle.DatabaseError as e:
+        print(f"Error al eliminar el procedimiento {procedimiento}: {e}")
+
+def generar_procedimiento_insert(cursor, tabla, columnas):
+    columnas_insertar = [col for col in columnas if col[2] is None or not col[2].startswith('NEXTVAL')]
+    cols = ", ".join([col[0] for col in columnas_insertar])
+    param_definitions = ", ".join([f"p_{col[0]} {col[1]}" for col in columnas_insertar])
+    valores = ", ".join([f"p_{col[0]}" for col in columnas_insertar])
+    
+    eliminar_procedimiento(cursor, f"{tabla}_insert")
+    
+    proc_insert = f"""
+    CREATE OR REPLACE PROCEDURE {tabla}_insert ({param_definitions}) AS
+    BEGIN
+        INSERT INTO {tabla} ({cols}) VALUES ({valores});
+    END {tabla}_insert;
+    """
+    try:
+        cursor.execute(proc_insert)
+        cursor.execute(f"ALTER PROCEDURE {tabla}_insert COMPILE")
+        cursor.execute(f"""
+            SELECT object_name, status
+            FROM user_objects
+            WHERE object_name = '{tabla.upper()}_INSERT'
+        """)
+        status = cursor.fetchall()
+        if status[0][1] == "INVALID":
+            raise Exception("Procedimiento inválido")
+        else:
+            print(f"Procedimiento INSERT para la tabla {tabla} creado exitosamente.")
     except Exception as e:
-        print(f"Error al obtener detalles de las tablas: {e}")
-        return {}
-
-def generar_procedimientos_crud(tablas):
-    procedimientos = []
-    for tabla, columnas in tablas.items():
-        nombre_tabla = tabla.lower()
-        cols = [col[0].lower() for col in columnas]
-        cols_str = ", ".join(cols)
-        params_str = ", ".join([f"p_{col} {col[1]}" for col in columnas])
-        
-        # Procedimiento CREATE
-        procedimientos.append(f"""
-        CREATE OR REPLACE PROCEDURE sp_create_{nombre_tabla}({params_str}) IS
-        BEGIN
-            INSERT INTO {nombre_tabla} ({cols_str})
-            VALUES ({", ".join([f"p_{col}" for col in cols])});
-            COMMIT;
-        END sp_create_{nombre_tabla};
+        print(f"Error al crear el procedimiento {tabla}_insert: {e}")
+        cursor.execute(f"""
+            SELECT line, position, text
+            FROM all_errors
+            WHERE name = '{tabla.upper()}_INSERT'
+            ORDER BY line, position
         """)
+        errors = cursor.fetchall()
+        for error in errors:
+            print(f"Error en línea {error[0]}, posición {error[1]}: {error[2]}")
 
-        # Procedimiento READ
-        procedimientos.append(f"""
-        CREATE OR REPLACE PROCEDURE sp_read_{nombre_tabla} (p_id IN {columnas[0][1]}, result OUT SYS_REFCURSOR) IS
-        BEGIN
-            OPEN result FOR
-            SELECT {cols_str}
-            FROM {nombre_tabla}
-            WHERE {cols[0]} = p_id;
-        END sp_read_{nombre_tabla};
+def ejecutar_procedimiento_insert(cursor, tabla, columnas):
+    valores = []
+    for col in columnas:
+        if col[2] is None or not col[2].startswith('NEXTVAL'):
+            valor = input(f"Ingrese el valor para {col[0]} ({col[1]}): ")
+            valores.append(valor)
+
+    try:
+        cursor.callproc(f"{tabla}_insert", valores)
+        print(f"Registro insertado en la tabla {tabla}.")
+    except cx_Oracle.IntegrityError as e:
+        print(f"Error: {e}")
+        cursor.execute("ROLLBACK")
+
+def generar_procedimiento_select(cursor, tabla):
+    eliminar_procedimiento(cursor, f"{tabla}_select")
+    
+    proc_select = f"""
+    CREATE OR REPLACE PROCEDURE {tabla}_select (p_cursor OUT SYS_REFCURSOR) AS
+    BEGIN
+        OPEN p_cursor FOR SELECT * FROM {tabla};
+    END {tabla}_select;
+    """
+    try:
+        cursor.execute(proc_select)
+        cursor.execute(f"ALTER PROCEDURE {tabla}_select COMPILE")
+        cursor.execute(f"""
+            SELECT object_name, status
+            FROM user_objects
+            WHERE object_name = '{tabla.upper()}_SELECT'
         """)
-
-        # Procedimiento UPDATE
-        set_clause = ", ".join([f"{col} = p_{col}" for col in cols[1:]])
-        procedimientos.append(f"""
-        CREATE OR REPLACE PROCEDURE sp_update_{nombre_tabla} ({params_str}) IS
-        BEGIN
-            UPDATE {nombre_tabla}
-            SET {set_clause}
-            WHERE {cols[0]} = p_{cols[0]};
-            COMMIT;
-        END sp_update_{nombre_tabla};
+        status = cursor.fetchall()
+        if status[0][1] == "INVALID":
+            raise Exception("Procedimiento inválido")
+        else:
+            print(f"Procedimiento SELECT para la tabla {tabla} creado exitosamente.")
+    except Exception as e:
+        print(f"Error al crear el procedimiento {tabla}_select: {e}")
+        cursor.execute(f"""
+            SELECT line, position, text
+            FROM all_errors
+            WHERE name = '{tabla.upper()}_SELECT'
+            ORDER BY line, position
         """)
+        errors = cursor.fetchall()
+        for error in errors:
+            print(f"Error en línea {error[0]}, posición {error[1]}: {error[2]}")
 
-        # Procedimiento DELETE
-        procedimientos.append(f"""
-        CREATE OR REPLACE PROCEDURE sp_delete_{nombre_tabla} (p_id IN {columnas[0][1]}) IS
-        BEGIN
-            DELETE FROM {nombre_tabla}
-            WHERE {cols[0]} = p_id;
-            COMMIT;
-        END sp_delete_{nombre_tabla};
+def ejecutar_procedimiento_select(cursor, tabla):
+    result = cursor.var(cx_Oracle.CURSOR)
+    cursor.callproc(f"{tabla}_select", [result])
+    for fila in result.getvalue():
+        print(fila)
+
+def generar_procedimiento_update(cursor, tabla, columnas, id_column, id_type):
+    columnas_update = [col for col in columnas if col[0] != id_column]
+    param_definitions = f"p_{id_column} {id_type}, " + ", ".join([f"p_{col[0]} {col[1]}" for col in columnas_update])
+    set_values = ", ".join([f"{col[0]} = p_{col[0]}" for col in columnas_update])
+    
+    eliminar_procedimiento(cursor, f"{tabla}_update")
+    
+    proc_update = f"""
+    CREATE OR REPLACE PROCEDURE {tabla}_update ({param_definitions}) AS
+    BEGIN
+        UPDATE {tabla} SET {set_values} WHERE {id_column} = p_{id_column};
+    END {tabla}_update;
+    """
+    try:
+        cursor.execute(proc_update)
+        cursor.execute(f"ALTER PROCEDURE {tabla}_update COMPILE")
+        cursor.execute(f"""
+            SELECT object_name, status
+            FROM user_objects
+            WHERE object_name = '{tabla.upper()}_UPDATE'
         """)
-    return "\n".join(procedimientos)
+        status = cursor.fetchall()
+        if status[0][1] == "INVALID":
+            raise Exception("Procedimiento inválido")
+        else:
+            print(f"Procedimiento UPDATE para la tabla {tabla} creado exitosamente.")
+    except Exception as e:
+        print(f"Error al crear el procedimiento {tabla}_update: {e}")
+        cursor.execute(f"""
+            SELECT line, position, text
+            FROM all_errors
+            WHERE name = '{tabla.upper()}_UPDATE'
+            ORDER BY line, position
+        """)
+        errors = cursor.fetchall()
+        for error in errors:
+            print(f"Error en línea {error[0]}, posición {error[1]}: {error[2]}")
 
-def guardar_procedimientos_en_archivo(procedimientos, archivo_sql):
-    with open(archivo_sql, "w") as file:
-        file.write(procedimientos)
-    print(f"Procedimientos almacenados generados en el archivo: {archivo_sql}")
+def ejecutar_procedimiento_update(cursor, tabla, columnas, id_column):
+    cursor.execute(f"SELECT * FROM {tabla}")
+    registros = cursor.fetchall()
+    if not registros:
+        print("No hay registros disponibles para actualizar.")
+        return
+
+    print("Registros disponibles:")
+    for i, registro in enumerate(registros, 1):
+        print(f"{i}. {registro}")
+
+    seleccion_registro = int(input("Seleccione el número del registro que desea actualizar: ")) - 1
+    if 0 <= seleccion_registro < len(registros):
+        registro_seleccionado = registros[seleccion_registro]
+        id_valor = registro_seleccionado[0]
+
+        valores = [id_valor]
+        for col in columnas:
+            if col[0] != id_column:
+                nuevo_valor = input(f"Ingrese el nuevo valor para {col[0]} ({col[1]}): ")
+                valores.append(nuevo_valor)
+
+        cursor.callproc(f"{tabla}_update", valores)
+        print(f"Registro actualizado en la tabla {tabla}.")
+    else:
+        print("Selección de registro no válida. Por favor, intente de nuevo.")
+
+def generar_procedimiento_delete(cursor, tabla, id_column, id_type):
+    eliminar_procedimiento(cursor, f"{tabla}_delete")
+    
+    proc_delete = f"""
+    CREATE OR REPLACE PROCEDURE {tabla}_delete (p_{id_column} {id_type}) AS
+    BEGIN
+        DELETE FROM {tabla} WHERE {id_column} = p_{id_column};
+    END {tabla}_delete;
+    """
+    try:
+        cursor.execute(proc_delete)
+        cursor.execute(f"ALTER PROCEDURE {tabla}_delete COMPILE")
+        cursor.execute(f"""
+            SELECT object_name, status
+            FROM user_objects
+            WHERE object_name = '{tabla.upper()}_DELETE'
+        """)
+        status = cursor.fetchall()
+        if status[0][1] == "INVALID":
+            raise Exception("Procedimiento inválido")
+        else:
+            print(f"Procedimiento DELETE para la tabla {tabla} creado exitosamente.")
+    except Exception as e:
+        print(f"Error al crear el procedimiento {tabla}_delete: {e}")
+        cursor.execute(f"""
+            SELECT line, position, text
+            FROM all_errors
+            WHERE name = '{tabla.upper()}_DELETE'
+            ORDER BY line, position
+        """)
+        errors = cursor.fetchall()
+        for error in errors:
+            print(f"Error en línea {error[0]}, posición {error[1]}: {error[2]}")
+
+def ejecutar_procedimiento_delete(cursor, tabla, id_column):
+    cursor.execute(f"SELECT * FROM {tabla}")
+    registros = cursor.fetchall()
+    if not registros:
+        print("No hay registros disponibles para eliminar.")
+        return
+
+    print("Registros disponibles:")
+    for i, registro in enumerate(registros, 1):
+        print(f"{i}. {registro}")
+
+    seleccion_registro = int(input("Seleccione el número del registro que desea eliminar: ")) - 1
+    if 0 <= seleccion_registro < len(registros):
+        registro_seleccionado = registros[seleccion_registro]
+        id_valor = registro_seleccionado[0]
+
+        cursor.callproc(f"{tabla}_delete", [id_valor])
+        print(f"Registro eliminado de la tabla {tabla}.")
+    else:
+        print("Selección de registro no válida. Por favor, intente de nuevo.")
 
 def opcion11(cursor):
-    print("Ejecutando opción 11...")
-    schema = 'rest'  # Cambiar al esquema correspondiente
-    tablas = obtener_detalles_tablas(cursor, schema)
-    if tablas:
-        procedimientos = generar_procedimientos_crud(tablas)
-        guardar_procedimientos_en_archivo(procedimientos, "procedimientos_crud.sql")
+    print("Ejecutando Opción 11...")
+    tablas = obtener_tablas(cursor)
+    print("Tablas disponibles:")
+    for i, tabla in enumerate(tablas, 1):
+        print(f"{i}. {tabla}")
+    
+    seleccion_tabla = int(input("Seleccione el número de la tabla: ")) - 1
+    if 0 <= seleccion_tabla < len(tablas):
+        tabla_seleccionada = tablas[seleccion_tabla]
+        columnas = obtener_columnas(cursor, tabla_seleccionada)
+        
+        id_column = next((col[0] for col in columnas if 'id' in col[0].lower()), None)
+        id_type = next((col[1] for col in columnas if col[0] == id_column), None)
+
+        print("1. Crear y ejecutar procedimiento INSERT")
+        print("2. Crear y ejecutar procedimiento SELECT")
+        print("3. Crear y ejecutar procedimiento UPDATE")
+        print("4. Crear y ejecutar procedimiento DELETE")
+        seleccion_procedimiento = int(input("Seleccione el procedimiento que desea crear y ejecutar: "))
+
+        if seleccion_procedimiento == 1:
+            generar_procedimiento_insert(cursor, tabla_seleccionada, columnas)
+            ejecutar_procedimiento_insert(cursor, tabla_seleccionada, columnas)
+        elif seleccion_procedimiento == 2:
+            generar_procedimiento_select(cursor, tabla_seleccionada)
+            ejecutar_procedimiento_select(cursor, tabla_seleccionada)
+        elif seleccion_procedimiento == 3:
+            generar_procedimiento_update(cursor, tabla_seleccionada, columnas, id_column, id_type)
+            ejecutar_procedimiento_update(cursor, tabla_seleccionada, columnas, id_column)
+        elif seleccion_procedimiento == 4:
+            generar_procedimiento_delete(cursor, tabla_seleccionada, id_column, id_type)
+            ejecutar_procedimiento_delete(cursor, tabla_seleccionada, id_column)
+        else:
+            print("Selección no válida. Por favor, intente de nuevo.")
     else:
-        print("No se encontraron tablas en el esquema especificado.")
+        print("Selección de tabla no válida. Por favor, intente de nuevo.")
 
 
+
+
+
+#TRIGGERS
+def obtener_columnas(cursor, tabla):
+    cursor.execute("""
+        SELECT column_name FROM user_tab_columns WHERE table_name = :1
+    """, [tabla])
+    return [row[0] for row in cursor.fetchall()]
+
+def crear_funcion_trigger(tabla, columnas):
+    columnas_str = ' || \',\' || '.join([f':NEW.{col}' for col in columnas])
+    columnas_str_old = ' || \',\' || '.join([f':OLD.{col}' for col in columnas])
+    return f"""
+    CREATE OR REPLACE TRIGGER audit_{tabla}_trg
+    AFTER INSERT OR UPDATE OR DELETE ON {tabla}
+    FOR EACH ROW
+    BEGIN
+        IF INSERTING THEN
+            INSERT INTO AUDITORIA (NOMBRE_TABLA, USUARIO_DB, ACCION, DESCRIPCION_CAMBIOS)
+            VALUES ('{tabla}', USER, 'INSERT', {columnas_str});
+        ELSIF UPDATING THEN
+            INSERT INTO AUDITORIA (NOMBRE_TABLA, USUARIO_DB, ACCION, DESCRIPCION_CAMBIOS)
+            VALUES ('{tabla}', USER, 'UPDATE', {columnas_str});
+        ELSIF DELETING THEN
+            INSERT INTO AUDITORIA (NOMBRE_TABLA, USUARIO_DB, ACCION, DESCRIPCION_CAMBIOS)
+            VALUES ('{tabla}', USER, 'DELETE', {columnas_str_old});
+        END IF;
+    END;
+    """
+
+def crear_trigger(cursor, tabla, columnas, sql_file):
+    try:
+        drop_sql = f"""
+        BEGIN
+            EXECUTE IMMEDIATE 'DROP TRIGGER audit_{tabla}_trg';
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF SQLCODE != -4080 THEN
+                    RAISE;
+                END IF;
+        END;
+        """
+        cursor.execute(drop_sql)
+        sql_file.write(drop_sql + '\n')
+    except cx_Oracle.DatabaseError as e:
+        print(f"Error al eliminar el trigger para {tabla}: {e}")
+    
+    trigger_sql = crear_funcion_trigger(tabla, columnas)
+    cursor.execute(trigger_sql)
+    sql_file.write(trigger_sql + '\n')
+    print(f"Trigger de auditoría creado para la tabla {tabla}")
+
+def opcion12(cursor):
+    print("Ejecutando Opción 1...")
+
+    cursor.execute("SELECT table_name FROM user_tables")
+    tablas = cursor.fetchall()
+
+    print("\nTablas disponibles en la base de datos:")
+    for idx, tabla in enumerate(tablas):
+        print(f"{idx + 1}. {tabla[0]}")
+
+    seleccion = input("\nSeleccione las tablas para auditar (separadas por coma, o 'all' para todas): ")
+
+    if seleccion.lower() == 'all':
+        tablas_seleccionadas = [tabla[0] for tabla in tablas]
+    else:
+        try:
+            indices = map(int, seleccion.split(','))
+            tablas_seleccionadas = [tablas[idx - 1][0] for idx in indices]
+        except ValueError:
+            print("Selección inválida. Por favor, use números separados por comas.")
+            return
+
+    with open("auditoria_triggers.sql", "w", encoding="utf-8") as sql_file:
+        for tabla in tablas_seleccionadas:
+            if tabla.lower() != 'auditoria':
+                columnas = obtener_columnas(cursor, tabla)
+                crear_trigger(cursor, tabla, columnas, sql_file)
+
+    print("\nDisparadores de auditoría creados exitosamente y guardados en 'auditoria_triggers.sql'.")
+
+
+#hilos
+def ejecutar_consulta(cursor, lock, query, results, index):
+    try:
+        start_time = time()
+        with lock:
+            cursor.execute(query)
+            result = cursor.fetchall()
+            headers = [desc[0] for desc in cursor.description]
+        end_time = time()
+        execution_time = end_time - start_time
+        results[index] = (headers, result, execution_time)
+    except Exception as e:
+        results[index] = ([], str(e), 0)
+
+def opcion13(cursor):
+    print("Ejecutando Opción 13...")
+
+    # Consultas complejas
+    queries = [
+        "SELECT ORDEN.ID_ORDEN, ORDEN.FECHA_ORDEN, CLIENTE.NOMBRE, CLIENTE.APELLIDO, ORDEN.TOTAL_PAGAR FROM ORDEN INNER JOIN CLIENTE ON ORDEN.CLIENTE_ID_CLIENTE = CLIENTE.ID_CLIENTE",
+        "SELECT RESERVACION.ID_RESERVACION, RESERVACION.FECHA_RESERVACION, CLIENTE.NOMBRE, CLIENTE.APELLIDO, MESA.CAPACIDAD, MESA.DISPONIBILIDAD FROM RESERVACION INNER JOIN CLIENTE ON RESERVACION.CLIENTE_ID_CLIENTE = CLIENTE.ID_CLIENTE INNER JOIN MESA ON RESERVACION.MESA_ID_MESA = MESA.ID_MESA",
+        "SELECT CLIENTE.NOMBRE, CLIENTE.APELLIDO, QUEJA.FECHA_QUEJA, CLIENTE_QUEJA.DSCR_QUEJA FROM CLIENTE_QUEJA INNER JOIN CLIENTE ON CLIENTE_QUEJA.CLIENTE_ID_CLIENTE = CLIENTE.ID_CLIENTE INNER JOIN QUEJA ON CLIENTE_QUEJA.QUEJA_ID_QUEJA = QUEJA.ID_QUEJA",
+        "SELECT PLATO.NOMBRE_PLATO, INGREDIENTES.NOM_INGREDIENTE, PLATO_INGREDIENTES.CANTIDAD FROM PLATO_INGREDIENTES INNER JOIN PLATO ON PLATO_INGREDIENTES.PLATO_ID_PLATO = PLATO.ID_PLATO INNER JOIN INGREDIENTES ON PLATO_INGREDIENTES.INGREDIENTES_ID_INGREDIENTES = INGREDIENTES.ID_INGREDIENTES",
+        "SELECT CLIENTE.NOMBRE, CLIENTE.APELLIDO, PAGO.METODO_PAGO, PAGO.FECHA_PAGO FROM PAGO INNER JOIN CLIENTE ON PAGO.CLIENTE_ID_CLIENTE = CLIENTE.ID_CLIENTE"
+    ]
+
+    threads = []
+    results = [None] * len(queries)
+    lock = threading.Lock()
+
+    for i, query in enumerate(queries):
+        thread = threading.Thread(target=ejecutar_consulta, args=(cursor, lock, query, results, i))
+        threads.append(thread)
+        thread.start()
+
+    for thread in threads:
+        thread.join()
+
+    generar_pdf_con_resultados(queries, results)
+
+def generar_pdf_con_resultados(queries, results):
+    fecha_hora = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = f"Resultados_Consultas_{fecha_hora}.pdf"
+
+    doc = SimpleDocTemplate(output_path, pagesize=letter)
+    story = []
+
+    for i, (query, (headers, result, exec_time)) in enumerate(zip(queries, results)):
+        story.append(Table([[f"Consulta {i + 1}", query]], colWidths=[2.5 * inch, 4.5 * inch]))
+        story.append(Table([["Tiempo de ejecución:", f"{exec_time} segundos"]], colWidths=[2.5 * inch, 4.5 * inch]))
+        story.append(Table([["Resultados:"]], colWidths=[7 * inch]))
+        
+        if isinstance(result, list) and result:
+            data = [headers] + result
+        else:
+            data = [["Sin resultados"]]
+        
+        t = Table(data)
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.gray),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('BOX', (0, 0), (-1, -1), 2, colors.black),
+        ]))
+        
+        story.append(t)
+        story.append(Spacer(1, 12))
+
+    doc.build(story)
+    print(f"Informe generado en: {output_path}")
 
 def main():
-    dsn_tns = cx_Oracle.makedsn('localhost', '1521', service_name='xe')
-    conexion = cx_Oracle.connect(user='system', password='adm', dsn=dsn_tns)
+    dsn = cx_Oracle.makedsn("localhost", 1521, service_name="xe")
+    conexion = cx_Oracle.connect(user="rest", password="adm", dsn=dsn)
+    conexion.autocommit = True
     cursor = conexion.cursor()
 
     while True:
@@ -670,6 +1030,10 @@ def main():
         elif opcion == '11':
             opcion11(cursor)
         elif opcion == '12':
+            opcion12(cursor)
+        elif opcion == '13':
+            opcion13(cursor)
+        elif opcion == '20':
             print("Saliendo del programa...")
             break
         else:
